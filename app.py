@@ -5,30 +5,48 @@ import pypdf
 import re
 import requests
 import json
-import streamlit.components.v1 as components
+import os
 
-# Configuración de página
-st.set_page_config(page_title="Cruce Objetivos - Control de Vuelos", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Control de Vuelos NOP + Tracking", layout="wide")
+
+# --- ESTILOS CSS PARA TABLAS COMPACTAS Y SCROLL HORIZONTAL ---
+st.markdown("""
+    <style>
+    /* Compactar padding de tablas y contenedores */
+    .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+    div[data-testid="stDataFrame"] { width: 100%; overflow-x: auto; }
+    div[data-testid="stTable"] { font-size: 12px; }
+    /* Ajuste para visualizar mejor las columnas juntas */
+    th, td { padding: 4px 8px !important; white-space: nowrap !important; }
+    </style>
+""", unsafe_allow_html=True)
 
 st.title("✈️ Control de Vuelos NOP + Radar en Tiempo Real")
 
-# --- PERSISTENCIA LOCAL EN EL NAVEGADOR (localStorage) ---
-def guardar_seleccion_local(lista_matriculas):
-    json_str = json.dumps(lista_matriculas)
-    components.html(
-        f"""
-        <script>
-        localStorage.setItem('vuelos_guardados_nop', '{json_str}');
-        </script>
-        """,
-        height=0
-    )
+STORAGE_FILE = "saved_targets.json"
 
-# --- FUNCIÓN ROBUTA DE PARSEO DE PDF NOP ---
+# --- FUNCIONES DE PERSISTENCIA EN DISCO ---
+def cargar_objetivos_guardados():
+    if os.path.exists(STORAGE_FILE):
+        try:
+            with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def guardar_objetivos_disco(lista_objetivos):
+    try:
+        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(lista_objetivos, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.error(f"Error guardando datos: {e}")
+
+# --- PARSER COMPLETO DEL PDF NOP ---
 def parse_nop_pdf(uploaded_file):
     records = []
     
-    # Intento 1: Extracción mediante pdfplumber (Especializado en Tablas)
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
@@ -38,24 +56,35 @@ def parse_nop_pdf(uploaded_file):
                         if not row or len(row) < 5:
                             continue
                         
-                        # Limpiar saltos de línea dentro de las celdas
-                        clean_row = [str(cell).replace('\n', ' ').strip() if cell else '' for cell in row]
+                        clean_row = [str(cell).replace('\n', ' ').strip() if cell is not None else '' for cell in row]
                         
-                        # Detectar si la celda 0 tiene formato de hora (ej: 00:01)
+                        # Comprobar si es fila de tráfico (inicia con hora HH:MM)
                         if re.match(r'^\d{2}:\d{2}$', clean_row[0]):
+                            # Asegurar que la fila tenga al menos 14 columnas
+                            while len(clean_row) < 14:
+                                clean_row.append("")
+                                
                             records.append({
+                                "Seleccionar": False,
                                 "Hora": clean_row[0],
-                                "ARCID": clean_row[1] if len(clean_row) > 1 else "",
-                                "Aeronave": clean_row[2] if len(clean_row) > 2 else "",
-                                "Matricula": clean_row[3] if len(clean_row) > 3 else "",
-                                "ADEP": clean_row[4] if len(clean_row) > 4 else "",
-                                "ADES": clean_row[5] if len(clean_row) > 5 else "",
-                                "Operador": clean_row[8] if len(clean_row) > 8 else (clean_row[7] if len(clean_row) > 7 else "")
+                                "ARCID": clean_row[1],
+                                "Aeronave": clean_row[2],
+                                "Matricula": clean_row[3],
+                                "ADEP": clean_row[4],
+                                "ADES": clean_row[5],
+                                "prefix3": clean_row[6],
+                                "Código externo": clean_row[7],
+                                "Operador (maestro)": clean_row[8],
+                                "Tipo objetivo": clean_row[9],
+                                "Inspecciones realizadas": clean_row[10],
+                                "Objetivo 2026": clean_row[11],
+                                "Restantes": clean_row[12],
+                                "Última inspección": clean_row[13]
                             })
     except Exception as e:
-        st.warning(f"Aviso en pdfplumber: {e}. Probando método secundario...")
+        st.warning(f"Extracción por tabla con aviso: {e}. Reintentando...")
 
-    # Intento 2 (Fallback): Regex directo por tokens sobre pypdf si el intento 1 devolvió vacío
+    # Fallback si pdfplumber no estructuró la tabla
     if not records:
         uploaded_file.seek(0)
         reader = pypdf.PdfReader(uploaded_file)
@@ -66,23 +95,29 @@ def parse_nop_pdf(uploaded_file):
         lines = full_text.split('\n')
         for line in lines:
             line_str = line.strip()
-            # Patrón para identificar filas que inician con hora HH:MM y capturar matrículas
             match = re.search(r'(\d{2}:\d{2})\s+([A-Z0-9]+)\s+([A-Z0-9]+)\s+([A-Z0-9-]+)\s+([A-Z]{4})\s+([A-Z]{4})', line_str)
             if match:
                 hora, arcid, aeronave, matricula, adep, ades = match.groups()
                 records.append({
+                    "Seleccionar": False,
                     "Hora": hora,
                     "ARCID": arcid,
                     "Aeronave": aeronave,
                     "Matricula": matricula,
                     "ADEP": adep,
                     "ADES": ades,
-                    "Operador": "N/D"
+                    "prefix3": "",
+                    "Código externo": "",
+                    "Operador (maestro)": "",
+                    "Tipo objetivo": "",
+                    "Inspecciones realizadas": "",
+                    "Objetivo 2026": "",
+                    "Restantes": "",
+                    "Última inspección": ""
                 })
 
     df = pd.DataFrame(records)
     if not df.empty:
-        # Filtrar encabezados residuales y matrículas no válidas
         df = df[df["Matricula"].str.contains(r'[A-Z0-9]', na=False)]
         df = df.drop_duplicates(subset=["Hora", "ARCID", "Matricula"]).reset_index(drop=True)
     return df
@@ -112,87 +147,131 @@ def consultar_telemetria_adsb(matricula):
         st.error(f"Error consultando telemetría para {matricula}: {e}")
     return None
 
-# --- NAVEGACIÓN Y ESTADO DE SESIÓN ---
-if "vuelos_objetivo" not in st.session_state:
-    st.session_state["vuelos_objetivo"] = []
+# --- INICIALIZAR ESTADO DE SESIÓN DESDE DISCO ---
+if "vuelos_guardados" not in st.session_state:
+    st.session_state["vuelos_guardados"] = cargar_objetivos_guardados()
 
-tab1, tab2 = st.tabs(["📋 Cargar PDF NOP y Seleccionar", "📡 Radar y Seguimiento Guardado"])
+tab1, tab2 = st.tabs(["📋 Cargar PDF NOP y Seleccionar", "📡 Radar y Vuelos Guardados"])
 
 with tab1:
-    st.header("Cargar Listado NOP Filtrado")
-    uploaded_file = st.file_uploader("Sube el PDF de tráfico (ej. NOP filtrado.pdf)", type=["pdf"])
+    st.header("Cargar Listado NOP y Selección de Vuelos")
+    uploaded_file = st.file_uploader("Sube el PDF NOP filtrado", type=["pdf"])
     
     if uploaded_file:
-        with st.spinner("Procesando y extrayendo las tablas del PDF..."):
+        with st.spinner("Extrayendo todas las columnas del PDF..."):
             df_vuelos = parse_nop_pdf(uploaded_file)
             
         if not df_vuelos.empty:
-            st.success(f"✅ Se han extraído correctamente {len(df_vuelos)} vuelos del documento.")
+            st.success(f"✅ Extraídos {len(df_vuelos)} vuelos con todas las columnas.")
+            st.caption("Marca la casilla 'Seleccionar' en las filas que desees guardar:")
             
-            # Buscador y selector múltiple
-            matriculas_unicas = sorted(df_vuelos["Matricula"].unique().tolist())
-            
-            seleccionadas = st.multiselect(
-                "Selecciona las aeronaves que deseas guardar para seguimiento permanente:",
-                options=matriculas_unicas,
-                default=[m for m in st.session_state["vuelos_objetivo"] if m in matriculas_unicas]
+            # Editor interactivo con casillas de verificación individuales por fila
+            edited_df = st.data_editor(
+                df_vuelos,
+                column_config={
+                    "Seleccionar": st.column_config.CheckboxColumn(
+                        "Seleccionar",
+                        help="Marca para guardar este vuelo",
+                        default=False,
+                    )
+                },
+                disabled=[col for col in df_vuelos.columns if col != "Seleccionar"],
+                hide_index=True,
+                use_container_width=True
             )
             
-            if st.button("💾 Guardar Selección para Seguimiento"):
-                st.session_state["vuelos_objetivo"] = list(set(st.session_state["vuelos_objetivo"] + seleccionadas))
-                guardar_seleccion_local(st.session_state["vuelos_objetivo"])
-                st.success(f"¡Guardadas {len(st.session_state['vuelos_objetivo'])} aeronaves en la memoria local!")
-            
-            # Mostrar tabla procesada
-            st.subheader("Lista Completa Extraída")
-            st.dataframe(df_vuelos[["Hora", "ARCID", "Aeronave", "Matricula", "ADEP", "ADES", "Operador"]], use_container_width=True)
+            if st.button("💾 Guardar Vuelos Seleccionados"):
+                # Filtrar filas donde la casilla esté marcada
+                seleccionados = edited_df[edited_df["Seleccionar"] == True].to_dict("records")
+                
+                if seleccionados:
+                    # Evitar duplicados por hora, arcid y matrícula
+                    existentes = {f"{v['Hora']}_{v['ARCID']}_{v['Matricula']}": v for v in st.session_state["vuelos_guardados"]}
+                    for item in seleccionados:
+                        key = f"{item['Hora']}_{item['ARCID']}_{item['Matricula']}"
+                        item_clean = {k: v for k, v in item.items() if k != "Seleccionar"}
+                        existentes[key] = item_clean
+                    
+                    st.session_state["vuelos_guardados"] = list(existentes.values())
+                    guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                    st.success(f"¡Se han guardado {len(seleccionados)} vuelos en el sistema!")
+                else:
+                    st.warning("No has marcado ninguna casilla para guardar.")
         else:
-            st.error("Error: No se pudieron extraer datos del PDF. Verifica que el archivo no esté protegido o vacío.")
+            st.error("Error al extraer los datos del PDF. Verifica el archivo.")
 
 with tab2:
     st.header("Seguimiento de Flota Guardada")
     
-    # Permitir añadir matrículas ejecutivas/privadas manualmente sin re-subir el PDF
-    col_input, col_add = st.columns([3, 1])
-    with col_input:
-        nueva_mat = st.text_input("Añadir matrículas privadas directamente (separadas por coma):", placeholder="ej: EC-NGX, N800KS, CS-PHV")
-    with col_add:
-        st.write(" ")
-        st.write(" ")
-        if st.button("Añadir"):
-            if nueva_mat:
-                m_list = [m.strip().upper() for m in nueva_mat.split(",") if m.strip()]
-                st.session_state["vuelos_objetivo"] = list(set(st.session_state["vuelos_objetivo"] + m_list))
-                guardar_seleccion_local(st.session_state["vuelos_objetivo"])
-                st.rerun()
+    # Formulario para agregar vuelos privados manualmente si es necesario
+    with st.expander("➕ Añadir matrícula manual (opcional)"):
+        col_m1, col_m2 = st.columns([3, 1])
+        with col_m1:
+            mat_manual = st.text_input("Matrícula:", placeholder="ej: EC-NGX")
+            arcid_manual = st.text_input("ARCID / Callsign (opcional):", placeholder="ej: HRN125")
+        with col_add := col_m2:
+            st.write(" ")
+            st.write(" ")
+            if st.button("Añadir Vuelo"):
+                if mat_manual:
+                    nuevo_item = {
+                        "Hora": "Manual",
+                        "ARCID": arcid_manual.upper() if arcid_manual else mat_manual.upper(),
+                        "Aeronave": "N/D",
+                        "Matricula": mat_manual.upper().strip(),
+                        "ADEP": "N/D",
+                        "ADES": "N/D",
+                        "prefix3": "",
+                        "Código externo": "",
+                        "Operador (maestro)": "Vuelo Privado / Manual",
+                        "Tipo objetivo": "Privado",
+                        "Inspecciones realizadas": "-",
+                        "Objetivo 2026": "-",
+                        "Restantes": "-",
+                        "Última inspección": "-"
+                    }
+                    st.session_state["vuelos_guardados"].append(nuevo_item)
+                    guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                    st.success(f"Añadida matrícula {mat_manual.upper()}")
+                    st.rerun()
 
-    if st.session_state["vuelos_objetivo"]:
-        st.write(f"**Aeronaves en seguimiento ({len(st.session_state['vuelos_objetivo'])}):**")
-        st.info(", ".join(sorted(st.session_state["vuelos_objetivo"])))
+    if st.session_state["vuelos_guardados"]:
+        df_guardados = pd.DataFrame(st.session_state["vuelos_guardados"])
         
-        target = st.selectbox("Selecciona la aeronave a rastrear:", sorted(st.session_state["vuelos_objetivo"]))
+        st.subheader("📋 Datos Guardados de los Vuelos Seleccionados")
+        # Mostrar tabla completa con scroll horizontal
+        st.dataframe(df_guardados, use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.subheader("📡 Radar de Seguimiento en Tiempo Real")
+        
+        opciones_rastreo = [f"{row['Matricula']} | {row['ARCID']} | {row['Hora']} ({row['ADEP']} ➔ {row['ADES']})" for row in st.session_state["vuelos_guardados"]]
+        
+        idx_seleccionado = st.selectbox("Selecciona un vuelo guardado para consultar su radar:", range(len(opciones_rastreo)), format_func=lambda x: opciones_rastreo[x])
+        
+        vuelo_target = st.session_state["vuelos_guardados"][idx_seleccionado]
+        mat_target = vuelo_target["Matricula"]
         
         if st.button("📡 Rastrear Posición Actual"):
-            with st.spinner(f"Consultando red ADS-B en vivo para {target}..."):
-                pos = consultar_telemetria_adsb(target)
+            with st.spinner(f"Consultando red ADS-B abierta para {mat_target}..."):
+                pos = consultar_telemetria_adsb(mat_target)
                 if pos and pos["lat"] and pos["lon"]:
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Callsign", pos["callsign"])
                     m2.metric("Altitud", f"{pos['altitud_ft']} ft" if pos['altitud_ft'] is not None else "N/A")
                     m3.metric("Velocidad", f"{pos['velocidad_kts']} kts" if pos['velocidad_kts'] is not None else "N/A")
-                    m4.metric("Estado", "En Vuelo" if pos["en_vuelo"] else "En Tierra / Emitiendo")
+                    m4.metric("Estado", "En Vuelo" if pos["en_vuelo"] else "En Tierra / Detectado")
                     
-                    st.write(f"**Coordenadas:** Lat {pos['lat']}, Lon {pos['lon']} | **Hex Code ICAO:** `{pos['hex']}`")
+                    st.write(f"**Coordenadas:** Lat {pos['lat']}, Lon {pos['lon']} | **Hex Code:** `{pos['hex']}`")
                     
-                    # Mapa centrado
                     df_map = pd.DataFrame([{"lat": pos["lat"], "lon": pos["lon"]}])
                     st.map(df_map, zoom=8)
                 else:
-                    st.warning(f"La aeronave {target} no está emitiendo señal ADS-B en directo o se encuentra en tierra sin cobertura activa.")
-                    
-        if st.button("🗑️ Limpiar Flota Guardada"):
-            st.session_state["vuelos_objetivo"] = []
-            guardar_seleccion_local([])
+                    st.warning(f"La aeronave {mat_target} no está emitiendo señal ADS-B en directo en este momento.")
+
+        if st.button("🗑️ Borrar Todos los Vuelos Guardados"):
+            st.session_state["vuelos_guardados"] = []
+            guardar_objetivos_disco([])
             st.rerun()
     else:
-        st.info("No hay aeronaves en seguimiento. Sube el PDF en la primera pestaña o añade matrículas manualmente.")
+        st.info("No hay vuelos guardados. Ve a la pestaña anterior, sube el PDF y marca las casillas de los vuelos que desees seguir.")

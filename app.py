@@ -209,7 +209,7 @@ with tab2:
         with col_m1:
             mat_manual = st.text_input("Matrícula:", placeholder="ej: EC-NGX")
             arcid_manual = st.text_input("ARCID / Callsign (opcional):", placeholder="ej: HRN125")
-        with col_add := col_m2:
+        with col_m2:
             st.write(" ")
             st.write(" ")
             if st.button("Añadir Vuelo"):

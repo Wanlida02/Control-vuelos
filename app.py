@@ -6,6 +6,8 @@ import re
 import requests
 import json
 import os
+from datetime import datetime, timedelta
+from collections import Counter
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Control de Vuelos NOP + Tracking", layout="wide")
@@ -13,16 +15,14 @@ st.set_page_config(page_title="Control de Vuelos NOP + Tracking", layout="wide")
 # --- ESTILOS CSS PARA TABLAS COMPACTAS Y SCROLL HORIZONTAL ---
 st.markdown("""
     <style>
-    /* Compactar padding de tablas y contenedores */
     .block-container { padding-top: 1.5rem; padding-bottom: 1.5rem; }
     div[data-testid="stDataFrame"] { width: 100%; overflow-x: auto; }
     div[data-testid="stTable"] { font-size: 12px; }
-    /* Ajuste para visualizar mejor las columnas juntas */
     th, td { padding: 4px 8px !important; white-space: nowrap !important; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("✈️ Control de Vuelos NOP + Radar en Tiempo Real")
+st.title("✈️ Control de Vuelos NOP + Radar en Tiempo Real (AESA SAFA/SANA)")
 
 STORAGE_FILE = "saved_targets.json"
 
@@ -43,10 +43,24 @@ def guardar_objetivos_disco(lista_objetivos):
     except Exception as e:
         st.error(f"Error guardando datos: {e}")
 
-# --- PARSER COMPLETO DEL PDF NOP ---
+# --- AJUSTE DE HORA SEGÚN TIPO DE VUELO ---
+def ajustar_hora(hora_str, es_salida):
+    if not re.match(r'^\d{2}:\d{2}$', str(hora_str).strip()):
+        return hora_str
+    if es_salida:
+        try:
+            t = datetime.strptime(hora_str.strip(), "%H:%M")
+            t_menos_1h = t - timedelta(hours=1)
+            return t_menos_1h.strftime("%H:%M")
+        except Exception:
+            return hora_str
+    return hora_str
+
+# --- PARSER COMPLETO DEL PDF NOP CON CÁLCULO DE LLEGADA / SALIDA ---
 def parse_nop_pdf(uploaded_file):
-    records = []
+    raw_records = []
     
+    # 1. Extracción con pdfplumber
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
@@ -58,15 +72,12 @@ def parse_nop_pdf(uploaded_file):
                         
                         clean_row = [str(cell).replace('\n', ' ').strip() if cell is not None else '' for cell in row]
                         
-                        # Comprobar si es fila de tráfico (inicia con hora HH:MM)
                         if re.match(r'^\d{2}:\d{2}$', clean_row[0]):
-                            # Asegurar que la fila tenga al menos 14 columnas
                             while len(clean_row) < 14:
                                 clean_row.append("")
                                 
-                            records.append({
-                                "Seleccionar": False,
-                                "Hora": clean_row[0],
+                            raw_records.append({
+                                "Hora_Orig": clean_row[0],
                                 "ARCID": clean_row[1],
                                 "Aeronave": clean_row[2],
                                 "Matricula": clean_row[3],
@@ -84,8 +95,8 @@ def parse_nop_pdf(uploaded_file):
     except Exception as e:
         st.warning(f"Extracción por tabla con aviso: {e}. Reintentando...")
 
-    # Fallback si pdfplumber no estructuró la tabla
-    if not records:
+    # 2. Fallback con pypdf si la extracción de tablas falló
+    if not raw_records:
         uploaded_file.seek(0)
         reader = pypdf.PdfReader(uploaded_file)
         full_text = ""
@@ -98,9 +109,8 @@ def parse_nop_pdf(uploaded_file):
             match = re.search(r'(\d{2}:\d{2})\s+([A-Z0-9]+)\s+([A-Z0-9]+)\s+([A-Z0-9-]+)\s+([A-Z]{4})\s+([A-Z]{4})', line_str)
             if match:
                 hora, arcid, aeronave, matricula, adep, ades = match.groups()
-                records.append({
-                    "Seleccionar": False,
-                    "Hora": hora,
+                raw_records.append({
+                    "Hora_Orig": hora,
                     "ARCID": arcid,
                     "Aeronave": aeronave,
                     "Matricula": matricula,
@@ -116,11 +126,49 @@ def parse_nop_pdf(uploaded_file):
                     "Última inspección": ""
                 })
 
-    df = pd.DataFrame(records)
-    if not df.empty:
-        df = df[df["Matricula"].str.contains(r'[A-Z0-9]', na=False)]
-        df = df.drop_duplicates(subset=["Hora", "ARCID", "Matricula"]).reset_index(drop=True)
-    return df
+    if not raw_records:
+        return pd.DataFrame(), None
+
+    # 3. Detectar el aeropuerto base (el más frecuente en ADEP y ADES)
+    aeropuertos = []
+    for r in raw_records:
+        if len(r["ADEP"]) == 4:
+            aeropuertos.append(r["ADEP"])
+        if len(r["ADES"]) == 4:
+            aeropuertos.append(r["ADES"])
+            
+    base_airport = Counter(aeropuertos).most_common(1)[0][0] if aeropuertos else "LEMD"
+
+    # 4. Formatear datos finales con la columna de flecha y hora ajustada
+    final_records = []
+    for r in raw_records:
+        es_salida = (r["ADEP"] == base_airport)
+        flecha = "⬆️" if es_salida else "⬇️"
+        hora_calculada = ajustar_hora(r["Hora_Orig"], es_salida)
+        
+        final_records.append({
+            "Seleccionar": False,
+            "Hora": hora_calculada,
+            "Tipo": flecha,
+            "ARCID": r["ARCID"],
+            "Aeronave": r["Aeronave"],
+            "Matricula": r["Matricula"],
+            "ADEP": r["ADEP"],
+            "ADES": r["ADES"],
+            "prefix3": r["prefix3"],
+            "Código externo": r["Código externo"],
+            "Operador (maestro)": r["Operador (maestro)"],
+            "Tipo objetivo": r["Tipo objetivo"],
+            "Inspecciones realizadas": r["Inspecciones realizadas"],
+            "Objetivo 2026": r["Objetivo 2026"],
+            "Restantes": r["Restantes"],
+            "Última inspección": r["Última inspección"]
+        })
+
+    df = pd.DataFrame(final_records)
+    df = df[df["Matricula"].str.contains(r'[A-Z0-9]', na=False)]
+    df = df.drop_duplicates(subset=["Hora", "ARCID", "Matricula"]).reset_index(drop=True)
+    return df, base_airport
 
 # --- CONSULTA TELEMETRÍA ADS-B ABIERTA ---
 def consultar_telemetria_adsb(matricula):
@@ -147,7 +195,7 @@ def consultar_telemetria_adsb(matricula):
         st.error(f"Error consultando telemetría para {matricula}: {e}")
     return None
 
-# --- INICIALIZAR ESTADO DE SESIÓN DESDE DISCO ---
+# --- INICIALIZAR ESTADO DE SESIÓN ---
 if "vuelos_guardados" not in st.session_state:
     st.session_state["vuelos_guardados"] = cargar_objetivos_guardados()
 
@@ -158,14 +206,14 @@ with tab1:
     uploaded_file = st.file_uploader("Sube el PDF NOP filtrado", type=["pdf"])
     
     if uploaded_file:
-        with st.spinner("Extrayendo todas las columnas del PDF..."):
-            df_vuelos = parse_nop_pdf(uploaded_file)
+        with st.spinner("Extrayendo vuelos y calculando horas de inspección..."):
+            df_vuelos, base_ap = parse_nop_pdf(uploaded_file)
             
         if not df_vuelos.empty:
-            st.success(f"✅ Extraídos {len(df_vuelos)} vuelos con todas las columnas.")
+            st.success(f"✅ Se extrajeron {len(df_vuelos)} vuelos. Aeropuerto base detectado: **{base_ap}**")
+            st.info("ℹ️ **Cálculo de horas:** Las llegadas (⬇️) mantienen la hora del archivo. Las salidas (⬆️) tienen 1 hora restada para la inspección.")
             st.caption("Marca la casilla 'Seleccionar' en las filas que desees guardar:")
             
-            # Editor interactivo con casillas de verificación individuales por fila
             edited_df = st.data_editor(
                 df_vuelos,
                 column_config={
@@ -173,7 +221,8 @@ with tab1:
                         "Seleccionar",
                         help="Marca para guardar este vuelo",
                         default=False,
-                    )
+                    ),
+                    "Tipo": st.column_config.TextColumn("Tipo", help="⬆️ Salida | ⬇️ Llegada", width="small")
                 },
                 disabled=[col for col in df_vuelos.columns if col != "Seleccionar"],
                 hide_index=True,
@@ -181,11 +230,9 @@ with tab1:
             )
             
             if st.button("💾 Guardar Vuelos Seleccionados"):
-                # Filtrar filas donde la casilla esté marcada
                 seleccionados = edited_df[edited_df["Seleccionar"] == True].to_dict("records")
                 
                 if seleccionados:
-                    # Evitar duplicados por hora, arcid y matrícula
                     existentes = {f"{v['Hora']}_{v['ARCID']}_{v['Matricula']}": v for v in st.session_state["vuelos_guardados"]}
                     for item in seleccionados:
                         key = f"{item['Hora']}_{item['ARCID']}_{item['Matricula']}"
@@ -203,19 +250,21 @@ with tab1:
 with tab2:
     st.header("Seguimiento de Flota Guardada")
     
-    # Formulario para agregar vuelos privados manualmente si es necesario
     with st.expander("➕ Añadir matrícula manual (opcional)"):
         col_m1, col_m2 = st.columns([3, 1])
         with col_m1:
             mat_manual = st.text_input("Matrícula:", placeholder="ej: EC-NGX")
             arcid_manual = st.text_input("ARCID / Callsign (opcional):", placeholder="ej: HRN125")
+            tipo_manual = st.selectbox("Tipo de vuelo:", ["⬇️ Llegada", "⬆️ Salida"])
+            hora_manual = st.text_input("Hora de inspección (HH:MM):", placeholder="ej: 14:30")
         with col_m2:
             st.write(" ")
             st.write(" ")
             if st.button("Añadir Vuelo"):
                 if mat_manual:
                     nuevo_item = {
-                        "Hora": "Manual",
+                        "Hora": hora_manual if hora_manual else "Manual",
+                        "Tipo": "⬆️" if "Salida" in tipo_manual else "⬇️",
                         "ARCID": arcid_manual.upper() if arcid_manual else mat_manual.upper(),
                         "Aeronave": "N/D",
                         "Matricula": mat_manual.upper().strip(),
@@ -239,13 +288,12 @@ with tab2:
         df_guardados = pd.DataFrame(st.session_state["vuelos_guardados"])
         
         st.subheader("📋 Datos Guardados de los Vuelos Seleccionados")
-        # Mostrar tabla completa con scroll horizontal
         st.dataframe(df_guardados, use_container_width=True, hide_index=True)
         
         st.markdown("---")
         st.subheader("📡 Radar de Seguimiento en Tiempo Real")
         
-        opciones_rastreo = [f"{row['Matricula']} | {row['ARCID']} | {row['Hora']} ({row['ADEP']} ➔ {row['ADES']})" for row in st.session_state["vuelos_guardados"]]
+        opciones_rastreo = [f"{row.get('Tipo', '')} {row['Matricula']} | {row['ARCID']} | Hora insp: {row['Hora']} ({row['ADEP']} ➔ {row['ADES']})" for row in st.session_state["vuelos_guardados"]]
         
         idx_seleccionado = st.selectbox("Selecciona un vuelo guardado para consultar su radar:", range(len(opciones_rastreo)), format_func=lambda x: opciones_rastreo[x])
         

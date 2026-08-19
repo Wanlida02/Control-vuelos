@@ -1,5 +1,7 @@
 streamlit
 pandas
-pypdf
 pdfplumber
+pypdf
 requests
+folium
+streamlit-folium

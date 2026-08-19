@@ -8,9 +8,11 @@ import json
 import os
 from datetime import datetime, timedelta
 from collections import Counter
+import folium
+from streamlit_folium import st_folium
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Control de Vuelos NOP + Tracking", layout="wide")
+st.set_page_config(page_title="Control de Vuelos NOP + Radar (SANA/SAFA)", layout="wide")
 
 # --- ESTILOS CSS PARA TABLAS COMPACTAS Y SCROLL HORIZONTAL ---
 st.markdown("""
@@ -56,11 +58,11 @@ def ajustar_hora(hora_str, es_salida):
             return hora_str
     return hora_str
 
-# --- PARSER COMPLETO DEL PDF NOP CON CÁLCULO DE LLEGADA / SALIDA ---
+# --- PARSER COMPLETO DEL PDF NOP ---
 def parse_nop_pdf(uploaded_file):
     raw_records = []
     
-    # 1. Extracción con pdfplumber
+    # Extracción primaria mediante pdfplumber
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
@@ -95,7 +97,7 @@ def parse_nop_pdf(uploaded_file):
     except Exception as e:
         st.warning(f"Extracción por tabla con aviso: {e}. Reintentando...")
 
-    # 2. Fallback con pypdf si la extracción de tablas falló
+    # Fallback secundario mediante pypdf
     if not raw_records:
         uploaded_file.seek(0)
         reader = pypdf.PdfReader(uploaded_file)
@@ -129,7 +131,7 @@ def parse_nop_pdf(uploaded_file):
     if not raw_records:
         return pd.DataFrame(), None
 
-    # 3. Detectar el aeropuerto base (el más frecuente en ADEP y ADES)
+    # Identificación del aeropuerto base
     aeropuertos = []
     for r in raw_records:
         if len(r["ADEP"]) == 4:
@@ -139,7 +141,7 @@ def parse_nop_pdf(uploaded_file):
             
     base_airport = Counter(aeropuertos).most_common(1)[0][0] if aeropuertos else "LEMD"
 
-    # 4. Formatear datos finales con la columna de flecha y hora ajustada
+    # Construcción final del dataset con flechas y cálculo de hora de inspección
     final_records = []
     for r in raw_records:
         es_salida = (r["ADEP"] == base_airport)
@@ -312,8 +314,31 @@ with tab2:
                     
                     st.write(f"**Coordenadas:** Lat {pos['lat']}, Lon {pos['lon']} | **Hex Code:** `{pos['hex']}`")
                     
-                    df_map = pd.DataFrame([{"lat": pos["lat"], "lon": pos["lon"]}])
-                    st.map(df_map, zoom=8)
+                    # --- COMPONENTE MAPA CON FOLIUM ---
+                    m = folium.Map(
+                        location=[pos["lat"], pos["lon"]],
+                        zoom_start=9,
+                        tiles="CartoDB positron"
+                    )
+
+                    popup_html = f"""
+                    <div style="font-family: Arial; font-size: 12px; width: 180px;">
+                        <b>Matrícula:</b> {mat_target}<br>
+                        <b>Callsign:</b> {pos['callsign']}<br>
+                        <b>Altitud:</b> {pos['altitud_ft']} ft<br>
+                        <b>Velocidad:</b> {pos['velocidad_kts']} kts<br>
+                        <b>Rumbo:</b> {pos['rumbo']}°
+                    </div>
+                    """
+
+                    folium.Marker(
+                        location=[pos["lat"], pos["lon"]],
+                        popup=folium.Popup(popup_html, max_width=200),
+                        tooltip=f"✈️ {mat_target} ({pos['callsign']})",
+                        icon=folium.Icon(color="red" if pos["en_vuelo"] else "blue", icon="plane", prefix="fa")
+                    ).add_to(m)
+
+                    st_folium(m, width=1100, height=500, returned_objects=[])
                 else:
                     st.warning(f"La aeronave {mat_target} no está emitiendo señal ADS-B en directo en este momento.")
 

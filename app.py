@@ -297,10 +297,23 @@ with tab2:
         
         opciones_rastreo = [f"{row.get('Tipo', '')} {row['Matricula']} | {row['ARCID']} | Hora insp: {row['Hora']} ({row['ADEP']} ➔ {row['ADES']})" for row in st.session_state["vuelos_guardados"]]
         
-        idx_seleccionado = st.selectbox("Selecciona un vuelo guardado para consultar su radar:", range(len(opciones_rastreo)), format_func=lambda x: opciones_rastreo[x])
+        col_sel, col_del = st.columns([4, 1])
+        with col_sel:
+            idx_seleccionado = st.selectbox("Selecciona un vuelo guardado para consultar su radar:", range(len(opciones_rastreo)), format_func=lambda x: opciones_rastreo[x])
         
         vuelo_target = st.session_state["vuelos_guardados"][idx_seleccionado]
         mat_target = vuelo_target["Matricula"]
+        
+        with col_del:
+            st.write(" ")
+            st.write(" ")
+            if st.button("🗑️ Eliminar este vuelo"):
+                # Eliminar el elemento seleccionado de la lista
+                vuelo_eliminado = st.session_state["vuelos_guardados"].pop(idx_seleccionado)
+                # Actualizar el archivo local JSON
+                guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                st.success(f"Vuelo {vuelo_eliminado['Matricula']} ({vuelo_eliminado['ARCID']}) eliminado correctamente.")
+                st.rerun()
         
         if st.button("📡 Rastrear Posición Actual"):
             with st.spinner(f"Consultando red ADS-B abierta para {mat_target}..."):
@@ -342,6 +355,7 @@ with tab2:
                 else:
                     st.warning(f"La aeronave {mat_target} no está emitiendo señal ADS-B en directo en este momento.")
 
+        st.markdown("---")
         if st.button("🗑️ Borrar Todos los Vuelos Guardados"):
             st.session_state["vuelos_guardados"] = []
             guardar_objetivos_disco([])

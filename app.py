@@ -11,7 +11,6 @@ from collections import Counter
 import folium
 from streamlit_folium import st_folium
 from fpdf import FPDF
-import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Control de Vuelos NOP + Radar (SANA/SAFA)", layout="wide")
@@ -73,22 +72,18 @@ def generar_pdf_objetivos(lista_vuelos):
     pdf.cell(0, 6, f"Reporte de Objetivos Guardados - Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(4)
 
-    # Anchos de columna para A4 Apaisado (~277mm de área imprimible)
-    # Total de 15 columnas
+    # Anchos de columna para A4 Apaisado
     col_widths = [14, 10, 16, 14, 18, 12, 12, 14, 20, 50, 18, 20, 18, 18, 23]
     headers = ["Hora", "Tipo", "ARCID", "Tipo Ac", "Matricula", "ADEP", "ADES", "Prefix", "Cod Ext", "Operador", "Obj", "Insp Real", "Obj 2026", "Rest", "Ult Insp"]
 
-    # Cabecera de la tabla
     pdf.set_font("Helvetica", style="B", size=7)
     pdf.set_fill_color(220, 230, 242)
     for i, h in enumerate(headers):
         pdf.cell(col_widths[i], 6, h, border=1, align="C", fill=True)
     pdf.ln()
 
-    # Filas de datos
     pdf.set_font("Helvetica", size=6.5)
     for row in lista_vuelos:
-        # Reemplazar símbolos Unicode complejos para mantener la compatibilidad del PDF
         tipo_str = "DEP (Salida)" if "⬆" in str(row.get("Tipo", "")) else "ARR (Llegada)"
         
         pdf.cell(col_widths[0], 5, str(row.get("Hora", "")), border=1, align="C")
@@ -108,7 +103,6 @@ def generar_pdf_objetivos(lista_vuelos):
         pdf.cell(col_widths[14], 5, str(row.get("Última inspección", "")), border=1, align="C")
         pdf.ln()
 
-    # Retornar como secuencia de bytes para Streamlit
     return bytes(pdf.output())
 
 # --- PARSER COMPLETO DEL PDF NOP ---
@@ -339,18 +333,39 @@ with tab2:
         df_guardados = pd.DataFrame(st.session_state["vuelos_guardados"])
         
         st.subheader("📋 Datos Guardados de los Vuelos Seleccionados")
-        st.dataframe(df_guardados, use_container_width=True, hide_index=True)
+        st.caption("💡 Puedes hacer doble clic sobre las celdas de Operador, Tipo Objetivo, Inspecciones, Restantes y Última inspección para editarlas directamente.")
         
-        # --- BOTÓN PARA DESCARGAR LA LISTA GUARDADA EN PDF ---
-        pdf_data = generar_pdf_objetivos(st.session_state["vuelos_guardados"])
-        fecha_str = datetime.now().strftime("%Y%m%d_%H%M")
+        # Columnas que NO se pueden modificar para evitar desconfigurar el seguimiento ADS-B
+        cols_bloqueadas = ["Hora", "Tipo", "ARCID", "Aeronave", "Matricula", "ADEP", "ADES", "prefix3", "Código externo"]
+        cols_editables = [col for col in df_guardados.columns if col not in cols_bloqueadas]
         
-        st.download_button(
-            label="📄 Descargar Objetivos Guardados en PDF",
-            data=pdf_data,
-            file_name=f"Objetivos_SANA_SAFA_{fecha_str}.pdf",
-            mime="application/pdf"
+        # Editor interactivo de datos guardados
+        df_guardados_editado = st.data_editor(
+            df_guardados,
+            disabled=cols_bloqueadas,
+            hide_index=True,
+            use_container_width=True,
+            key="editor_guardados"
         )
+        
+        col_btn_save, col_btn_pdf = st.columns([1, 1])
+        with col_btn_save:
+            if st.button("💾 Guardar Cambios Editados"):
+                st.session_state["vuelos_guardados"] = df_guardados_editado.to_dict("records")
+                guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                st.success("¡Datos de inspección actualizados correctamente!")
+                st.rerun()
+
+        with col_btn_pdf:
+            pdf_data = generar_pdf_objetivos(st.session_state["vuelos_guardados"])
+            fecha_str = datetime.now().strftime("%Y%m%d_%H%M")
+            
+            st.download_button(
+                label="📄 Descargar Objetivos Guardados en PDF",
+                data=pdf_data,
+                file_name=f"Objetivos_SANA_SAFA_{fecha_str}.pdf",
+                mime="application/pdf"
+            )
         
         st.markdown("---")
         st.subheader("📡 Radar de Seguimiento en Tiempo Real")

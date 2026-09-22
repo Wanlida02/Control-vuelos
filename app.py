@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from collections import Counter
 import folium
 from streamlit_folium import st_folium
+from fpdf import FPDF
+import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Control de Vuelos NOP + Radar (SANA/SAFA)", layout="wide")
@@ -58,11 +60,61 @@ def ajustar_hora(hora_str, es_salida):
             return hora_str
     return hora_str
 
+# --- GENERACIÓN DE PDF EXPORTABLE ---
+def generar_pdf_objetivos(lista_vuelos):
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=10)
+    
+    # Cabecera del Documento
+    pdf.set_font("Helvetica", style="B", size=14)
+    pdf.cell(0, 8, "AESA - Inspeccion SANA / SAFA", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", size=10)
+    pdf.cell(0, 6, f"Reporte de Objetivos Guardados - Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(4)
+
+    # Anchos de columna para A4 Apaisado (~277mm de área imprimible)
+    # Total de 15 columnas
+    col_widths = [14, 10, 16, 14, 18, 12, 12, 14, 20, 50, 18, 20, 18, 18, 23]
+    headers = ["Hora", "Tipo", "ARCID", "Tipo Ac", "Matricula", "ADEP", "ADES", "Prefix", "Cod Ext", "Operador", "Obj", "Insp Real", "Obj 2026", "Rest", "Ult Insp"]
+
+    # Cabecera de la tabla
+    pdf.set_font("Helvetica", style="B", size=7)
+    pdf.set_fill_color(220, 230, 242)
+    for i, h in enumerate(headers):
+        pdf.cell(col_widths[i], 6, h, border=1, align="C", fill=True)
+    pdf.ln()
+
+    # Filas de datos
+    pdf.set_font("Helvetica", size=6.5)
+    for row in lista_vuelos:
+        # Reemplazar símbolos Unicode complejos para mantener la compatibilidad del PDF
+        tipo_str = "DEP (Salida)" if "⬆" in str(row.get("Tipo", "")) else "ARR (Llegada)"
+        
+        pdf.cell(col_widths[0], 5, str(row.get("Hora", "")), border=1, align="C")
+        pdf.cell(col_widths[1], 5, "DEP" if "DEP" in tipo_str else "ARR", border=1, align="C")
+        pdf.cell(col_widths[2], 5, str(row.get("ARCID", ""))[:10], border=1, align="C")
+        pdf.cell(col_widths[3], 5, str(row.get("Aeronave", ""))[:8], border=1, align="C")
+        pdf.cell(col_widths[4], 5, str(row.get("Matricula", ""))[:10], border=1, align="C")
+        pdf.cell(col_widths[5], 5, str(row.get("ADEP", ""))[:4], border=1, align="C")
+        pdf.cell(col_widths[6], 5, str(row.get("ADES", ""))[:4], border=1, align="C")
+        pdf.cell(col_widths[7], 5, str(row.get("prefix3", ""))[:8], border=1, align="C")
+        pdf.cell(col_widths[8], 5, str(row.get("Código externo", ""))[:10], border=1, align="C")
+        pdf.cell(col_widths[9], 5, str(row.get("Operador (maestro)", ""))[:32], border=1, align="L")
+        pdf.cell(col_widths[10], 5, str(row.get("Tipo objetivo", ""))[:10], border=1, align="C")
+        pdf.cell(col_widths[11], 5, str(row.get("Inspecciones realizadas", "")), border=1, align="C")
+        pdf.cell(col_widths[12], 5, str(row.get("Objetivo 2026", "")), border=1, align="C")
+        pdf.cell(col_widths[13], 5, str(row.get("Restantes", "")), border=1, align="C")
+        pdf.cell(col_widths[14], 5, str(row.get("Última inspección", "")), border=1, align="C")
+        pdf.ln()
+
+    # Retornar como secuencia de bytes para Streamlit
+    return bytes(pdf.output())
+
 # --- PARSER COMPLETO DEL PDF NOP ---
 def parse_nop_pdf(uploaded_file):
     raw_records = []
     
-    # Extracción primaria mediante pdfplumber
     try:
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
@@ -97,7 +149,6 @@ def parse_nop_pdf(uploaded_file):
     except Exception as e:
         st.warning(f"Extracción por tabla con aviso: {e}. Reintentando...")
 
-    # Fallback secundario mediante pypdf
     if not raw_records:
         uploaded_file.seek(0)
         reader = pypdf.PdfReader(uploaded_file)
@@ -131,7 +182,6 @@ def parse_nop_pdf(uploaded_file):
     if not raw_records:
         return pd.DataFrame(), None
 
-    # Identificación del aeropuerto base
     aeropuertos = []
     for r in raw_records:
         if len(r["ADEP"]) == 4:
@@ -141,7 +191,6 @@ def parse_nop_pdf(uploaded_file):
             
     base_airport = Counter(aeropuertos).most_common(1)[0][0] if aeropuertos else "LEMD"
 
-    # Construcción final del dataset con flechas y cálculo de hora de inspección
     final_records = []
     for r in raw_records:
         es_salida = (r["ADEP"] == base_airport)
@@ -292,6 +341,17 @@ with tab2:
         st.subheader("📋 Datos Guardados de los Vuelos Seleccionados")
         st.dataframe(df_guardados, use_container_width=True, hide_index=True)
         
+        # --- BOTÓN PARA DESCARGAR LA LISTA GUARDADA EN PDF ---
+        pdf_data = generar_pdf_objetivos(st.session_state["vuelos_guardados"])
+        fecha_str = datetime.now().strftime("%Y%m%d_%H%M")
+        
+        st.download_button(
+            label="📄 Descargar Objetivos Guardados en PDF",
+            data=pdf_data,
+            file_name=f"Objetivos_SANA_SAFA_{fecha_str}.pdf",
+            mime="application/pdf"
+        )
+        
         st.markdown("---")
         st.subheader("📡 Radar de Seguimiento en Tiempo Real")
         
@@ -308,9 +368,7 @@ with tab2:
             st.write(" ")
             st.write(" ")
             if st.button("🗑️ Eliminar este vuelo"):
-                # Eliminar el elemento seleccionado de la lista
                 vuelo_eliminado = st.session_state["vuelos_guardados"].pop(idx_seleccionado)
-                # Actualizar el archivo local JSON
                 guardar_objetivos_disco(st.session_state["vuelos_guardados"])
                 st.success(f"Vuelo {vuelo_eliminado['Matricula']} ({vuelo_eliminado['ARCID']}) eliminado correctamente.")
                 st.rerun()
@@ -327,7 +385,6 @@ with tab2:
                     
                     st.write(f"**Coordenadas:** Lat {pos['lat']}, Lon {pos['lon']} | **Hex Code:** `{pos['hex']}`")
                     
-                    # --- COMPONENTE MAPA CON FOLIUM ---
                     m = folium.Map(
                         location=[pos["lat"], pos["lon"]],
                         zoom_start=9,

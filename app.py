@@ -69,7 +69,7 @@ def generar_pdf_objetivos(lista_vuelos):
     col_widths = [14, 10, 16, 14, 18, 12, 12, 14, 20, 50, 18, 20, 18, 18, 23]
     headers = ["Hora", "Tipo", "ARCID", "Aeronave", "Matricula", "ADEP", "ADES", "prefix3", "Cod Ext", "Operador (maestro)", "Tipo obj", "Insp Real", "Obj 2026", "Rest", "Ult Insp"]
 
-    # Cabecera directa de la tabla (sin títulos o logos adicionales)
+    # Cabecera directa de la tabla
     pdf.set_font("Helvetica", style="B", size=7)
     pdf.set_fill_color(230, 230, 230)
     for i, h in enumerate(headers):
@@ -221,6 +221,205 @@ def consultar_telemetria_adsb(matricula):
             ac_list = data.get("ac", [])
             if ac_list:
                 ac = ac_list[0]
+                flight_val = ac.get("flight", "N/A")
                 return {
                     "hex": ac.get("hex"),
-                    "callsign": ac.get("flight
+                    "callsign": str(flight_val).strip() if flight_val else "N/A",
+                    "lat": ac.get("lat"),
+                    "lon": ac.get("lon"),
+                    "altitud_ft": ac.get("alt_baro"),
+                    "velocidad_kts": ac.get("gs"),
+                    "rumbo": ac.get("track"),
+                    "en_vuelo": ac.get("gs", 0) > 30 if ac.get("gs") else False
+                }
+    except Exception as e:
+        st.error(f"Error consultando telemetría para {matricula}: {e}")
+    return None
+
+# --- INICIALIZAR ESTADO DE SESIÓN ---
+if "vuelos_guardados" not in st.session_state:
+    st.session_state["vuelos_guardados"] = cargar_objetivos_guardados()
+
+tab1, tab2 = st.tabs(["📥 Cargar Documento", "📋 Registros Seleccionados"])
+
+with tab1:
+    st.header("Cargar Documento de Origen")
+    uploaded_file = st.file_uploader("Selecciona archivo de datos (.pdf)", type=["pdf"])
+    
+    if uploaded_file:
+        with st.spinner("Procesando datos del documento..."):
+            df_vuelos, base_ap = parse_nop_pdf(uploaded_file)
+            
+        if not df_vuelos.empty:
+            st.success(f"✅ Se procesaron {len(df_vuelos)} registros correctamente (Ref: {base_ap}).")
+            st.caption("Selecciona las casillas correspondientes a las filas que desees conservar:")
+            
+            edited_df = st.data_editor(
+                df_vuelos,
+                column_config={
+                    "Seleccionar": st.column_config.CheckboxColumn(
+                        "Seleccionar",
+                        help="Marcar fila",
+                        default=False,
+                    ),
+                    "Tipo": st.column_config.TextColumn("Tipo", width="small")
+                },
+                disabled=[col for col in df_vuelos.columns if col != "Seleccionar"],
+                hide_index=True,
+                use_container_width=True
+            )
+            
+            if st.button("💾 Conservar Filas Seleccionadas"):
+                seleccionados = edited_df[edited_df["Seleccionar"] == True].to_dict("records")
+                
+                if seleccionados:
+                    existentes = {f"{v['Hora']}_{v['ARCID']}_{v['Matricula']}": v for v in st.session_state["vuelos_guardados"]}
+                    for item in seleccionados:
+                        key = f"{item['Hora']}_{item['ARCID']}_{item['Matricula']}"
+                        item_clean = {k: v for k, v in item.items() if k != "Seleccionar"}
+                        existentes[key] = item_clean
+                    
+                    st.session_state["vuelos_guardados"] = list(existentes.values())
+                    guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                    st.success(f"¡Se han guardado {len(seleccionados)} registros!")
+                else:
+                    st.warning("No hay filas seleccionadas.")
+        else:
+            st.error("No se pudieron extraer datos del documento.")
+
+with tab2:
+    st.header("Gestión de Registros Conservados")
+    
+    with st.expander("➕ Entrada manual (opcional)"):
+        col_m1, col_m2 = st.columns([3, 1])
+        with col_m1:
+            mat_manual = st.text_input("Matricula:", placeholder="ej: EC-NGX")
+            arcid_manual = st.text_input("ARCID / Callsign (opcional):", placeholder="ej: HRN125")
+            tipo_manual = st.selectbox("Sentido:", ["⬇️ Entrada", "⬆️ Salida"])
+            hora_manual = st.text_input("Hora (HH:MM):", placeholder="ej: 14:30")
+        with col_m2:
+            st.write(" ")
+            st.write(" ")
+            if st.button("Añadir Registro"):
+                if mat_manual:
+                    nuevo_item = {
+                        "Hora": hora_manual if hora_manual else "Manual",
+                        "Tipo": "⬆️" if "Salida" in tipo_manual else "⬇️",
+                        "ARCID": arcid_manual.upper() if arcid_manual else mat_manual.upper(),
+                        "Aeronave": "-",
+                        "Matricula": mat_manual.upper().strip(),
+                        "ADEP": "-",
+                        "ADES": "-",
+                        "prefix3": "",
+                        "Código externo": "",
+                        "Operador (maestro)": "Entrada Manual",
+                        "Tipo objetivo": "-",
+                        "Inspecciones realizadas": "-",
+                        "Objetivo 2026": "-",
+                        "Restantes": "-",
+                        "Última inspección": "-"
+                    }
+                    st.session_state["vuelos_guardados"].append(nuevo_item)
+                    guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                    st.success(f"Añadido {mat_manual.upper()}")
+                    st.rerun()
+
+    if st.session_state["vuelos_guardados"]:
+        df_guardados = pd.DataFrame(st.session_state["vuelos_guardados"])
+        
+        st.subheader("📋 Tabla de Registros Conservados")
+        
+        cols_bloqueadas = ["Hora", "Tipo", "ARCID", "Aeronave", "Matricula", "ADEP", "ADES", "prefix3", "Código externo"]
+        
+        df_guardados_editado = st.data_editor(
+            df_guardados,
+            disabled=cols_bloqueadas,
+            hide_index=True,
+            use_container_width=True,
+            key="editor_guardados"
+        )
+        
+        col_btn_save, col_btn_pdf = st.columns([1, 1])
+        with col_btn_save:
+            if st.button("💾 Guardar Cambios"):
+                st.session_state["vuelos_guardados"] = df_guardados_editado.to_dict("records")
+                guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                st.success("Cambios actualizados.")
+                st.rerun()
+
+        with col_btn_pdf:
+            pdf_data = generar_pdf_objetivos(st.session_state["vuelos_guardados"])
+            fecha_str = datetime.now().strftime("%Y%m%d_%H%M")
+            
+            st.download_button(
+                label="📄 Exportar Resumen (PDF)",
+                data=pdf_data,
+                file_name=f"Posibles_Objetivos_{fecha_str}.pdf",
+                mime="application/pdf"
+            )
+        
+        st.markdown("---")
+        st.subheader("📍 Consulta de Ubicación en Tiempo Real")
+        
+        opciones_rastreo = [f"{row.get('Tipo', '')} {row['Matricula']} | {row['ARCID']} | {row['Hora']} ({row['ADEP']} ➔ {row['ADES']})" for row in st.session_state["vuelos_guardados"]]
+        
+        col_sel, col_del = st.columns([4, 1])
+        with col_sel:
+            idx_seleccionado = st.selectbox("Seleccionar fila para localizar:", range(len(opciones_rastreo)), format_func=lambda x: opciones_rastreo[x])
+        
+        vuelo_target = st.session_state["vuelos_guardados"][idx_seleccionado]
+        mat_target = vuelo_target["Matricula"]
+        
+        with col_del:
+            st.write(" ")
+            st.write(" ")
+            if st.button("🗑️ Eliminar Fila"):
+                vuelo_eliminado = st.session_state["vuelos_guardados"].pop(idx_seleccionado)
+                guardar_objetivos_disco(st.session_state["vuelos_guardados"])
+                st.success(f"Registro {vuelo_eliminado['Matricula']} eliminado.")
+                st.rerun()
+        
+        if st.button("🔍 Consultar Estado Actual"):
+            with st.spinner(f"Obteniendo datos de ubicación para {mat_target}..."):
+                pos = consultar_telemetria_adsb(mat_target)
+                if pos and pos["lat"] and pos["lon"]:
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Identificación", pos["callsign"])
+                    m2.metric("Altitud", f"{pos['altitud_ft']} ft" if pos['altitud_ft'] is not None else "N/A")
+                    m3.metric("Velocidad", f"{pos['velocidad_kts']} kts" if pos['velocidad_kts'] is not None else "N/A")
+                    m4.metric("Estado", "En Tránsito" if pos["en_vuelo"] else "Estacionado / Estático")
+                    
+                    m = folium.Map(
+                        location=[pos["lat"], pos["lon"]],
+                        zoom_start=9,
+                        tiles="CartoDB positron"
+                    )
+
+                    popup_html = f"""
+                    <div style="font-family: Arial; font-size: 12px; width: 180px;">
+                        <b>Matricula:</b> {mat_target}<br>
+                        <b>ARCID:</b> {pos['callsign']}<br>
+                        <b>Alt:</b> {pos['altitud_ft']} ft<br>
+                        <b>Vel:</b> {pos['velocidad_kts']} kts<br>
+                        <b>Rumbo:</b> {pos['rumbo']}°
+                    </div>
+                    """
+
+                    folium.Marker(
+                        location=[pos["lat"], pos["lon"]],
+                        popup=folium.Popup(popup_html, max_width=200),
+                        tooltip=f"📍 {mat_target} ({pos['callsign']})",
+                        icon=folium.Icon(color="red" if pos["en_vuelo"] else "blue", icon="info-sign", prefix="fa")
+                    ).add_to(m)
+
+                    st_folium(m, width=1100, height=500, returned_objects=[])
+                else:
+                    st.warning(f"El registro {mat_target} no está emitiendo datos en tiempo real.")
+
+        st.markdown("---")
+        if st.button("🗑️ Vaciar Todos los Registros"):
+            st.session_state["vuelos_guardados"] = []
+            guardar_objetivos_disco([])
+            st.rerun()
+    else:
+        st.info("No hay registros conservados.")

@@ -65,7 +65,7 @@ def generar_pdf_objetivos(lista_vuelos):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=10)
 
-    # Anchos de columna para A4 Apaisado (~277mm de área imprimible)
+    # Anchos de columna para A4 Apaisado (~277mm)
     col_widths = [14, 10, 16, 14, 18, 12, 12, 14, 20, 50, 18, 20, 18, 18, 23]
     headers = ["Hora", "Tipo", "ARCID", "Aeronave", "Matricula", "ADEP", "ADES", "prefix3", "Cod Ext", "Operador (maestro)", "Tipo obj", "Insp Real", "Obj 2026", "Rest", "Ult Insp"]
 
@@ -382,37 +382,31 @@ with tab2:
         if st.button("🔍 Consultar Estado Actual"):
             with st.spinner(f"Obteniendo datos de ubicación para {mat_target}..."):
                 pos = consultar_telemetria_adsb(mat_target)
-                if pos and pos["lat"] and pos["lon"]:
+                if pos and pos.get("lat") is not None and pos.get("lon") is not None:
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Identificación", pos["callsign"])
                     m2.metric("Altitud", f"{pos['altitud_ft']} ft" if pos['altitud_ft'] is not None else "N/A")
                     m3.metric("Velocidad", f"{pos['velocidad_kts']} kts" if pos['velocidad_kts'] is not None else "N/A")
                     m4.metric("Estado", "En Tránsito" if pos["en_vuelo"] else "Estacionado / Estático")
                     
+                    # Construir mapa Folium sin bloqueos de renderizado
                     m = folium.Map(
                         location=[pos["lat"], pos["lon"]],
                         zoom_start=9,
                         tiles="CartoDB positron"
                     )
 
-                    popup_html = f"""
-                    <div style="font-family: Arial; font-size: 12px; width: 180px;">
-                        <b>Matricula:</b> {mat_target}<br>
-                        <b>ARCID:</b> {pos['callsign']}<br>
-                        <b>Alt:</b> {pos['altitud_ft']} ft<br>
-                        <b>Vel:</b> {pos['velocidad_kts']} kts<br>
-                        <b>Rumbo:</b> {pos['rumbo']}°
-                    </div>
-                    """
+                    popup_text = f"Matricula: {mat_target} | ARCID: {pos['callsign']} | Alt: {pos['altitud_ft']}ft | Vel: {pos['velocidad_kts']}kts"
 
                     folium.Marker(
                         location=[pos["lat"], pos["lon"]],
-                        popup=folium.Popup(popup_html, max_width=200),
+                        popup=folium.Popup(popup_text, max_width=250),
                         tooltip=f"📍 {mat_target} ({pos['callsign']})",
-                        icon=folium.Icon(color="red" if pos["en_vuelo"] else "blue", icon="info-sign", prefix="fa")
+                        icon=folium.Icon(color="red" if pos["en_vuelo"] else "blue", icon="plane", prefix="fa")
                     ).add_to(m)
 
-                    st_folium(m, width=1100, height=500, returned_objects=[])
+                    # Renderizado estándar interactivo
+                    st_folium(m, width=1100, height=500)
                 else:
                     st.warning(f"El registro {mat_target} no está emitiendo datos en tiempo real.")
 
